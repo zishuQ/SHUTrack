@@ -1,0 +1,62 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{duetalgorithm}[2026/07/29 Compact ruled algorithm style for DUETTrack]
+
+\RequirePackage{xcolor}
+
+\newcounter{duetalgorithm}
+\newcounter{duetalgline}
+\renewcommand{\theduetalgorithm}{\arabic{duetalgorithm}}
+
+\newenvironment{duetalgorithm}[1]{%
+  \begin{figure}[!ht]
+  \refstepcounter{duetalgorithm}%
+  \setcounter{duetalgline}{0}%
+  \small
+  \hrule height 0.8pt
+  \vspace{2.5pt}
+  \noindent\textbf{Algorithm \theduetalgorithm:} #1\par
+  \vspace{2.5pt}
+  \hrule height 0.8pt
+  \vspace{3pt}
+}{%
+  \vspace{2.5pt}
+  \hrule height 0.8pt
+  \end{figure}
+}
+
+\newcommand{\DuetAlgoIO}[2]{%
+  \noindent
+  \begin{minipage}[t]{\linewidth}
+    \hangindent=3.9em
+    \hangafter=1
+    \textbf{#1:} #2
+  \end{minipage}\par
+  \vspace{1.5pt}
+}
+
+\newcommand{\DuetAlgoStage}[2]{%
+  \vspace{1.5pt}
+  \noindent\hspace*{2.55em}%
+  \texttt{/* \textcolor{#1}{#2} */}\par
+  \vspace{0.5pt}
+}
+
+\newcommand{\DuetAlgoIndent}{%
+  \textcolor{black!48}{\rule[-0.35ex]{0.45pt}{1.75ex}}%
+  \hspace{0.6em}%
+}
+
+\newcommand{\DuetAlgoLine}[1]{%
+  \stepcounter{duetalgline}%
+  \noindent
+  \makebox[2.05em][r]{\scriptsize\bfseries\arabic{duetalgline}}%
+  \hspace{0.5em}%
+  \begin{minipage}[t]{\dimexpr\linewidth-2.75em\relax}
+    #1
+  \end{minipage}\par
+  \vspace{0.25pt}
+}
+
+\newcommand{\DuetKw}[1]{\textbf{#1}}
+
+\endinput
