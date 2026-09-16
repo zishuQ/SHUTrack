@@ -7,16 +7,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Python cache / virtualenvs
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-env/
-
 # LaTeX build artifacts
 *.aux
 *.abs

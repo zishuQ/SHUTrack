@@ -22,7 +22,7 @@
 %\documentclass[a4paper,fleqn,longmktitle]{cas-dc}
 \documentclass[a4paper,fleqn]{cas-sc}
 
-\usepackage{lmodern}
+% Use the fonts loaded by cas-sc; loading lmodern here conflicts with STIX math.
 \usepackage[numbers]{natbib}
 \usepackage{xcolor}
 \usepackage{amsmath,amsfonts,amssymb,bm}
@@ -86,354 +86,309 @@
 \cortext[cor1]{Corresponding author}
 
 \begin{abstract}
-Online multi-object tracking relies on matched detections to continually update track states, but a detection that supports the current association may still cause a harmful update. An inaccurate bounding box or a corrupted appearance feature can enter the track state and affect later predictions and associations. The same detection may also have different effects on motion and appearance, making it difficult to decide which updates should be allowed. To address this problem, we propose SHUTrack, a framework that learns to suppress harmful state updates after association. Its main idea is to assess an update by its effect on the existing track state. During training, SHUTrack compares the later effects of updating the state with a matched detection and retaining the state before that update. This comparison provides a learning signal for deciding when an update should be reduced. A Harm-Aware Update Controller (HUC) makes separate update decisions for motion and appearance, while a Reliability-Guided Update Calibrator (RUC) refines these decisions using track context. Together, they limit harmful updates while allowing the tracker to adapt to target changes. Experiments on MOT17, MOT20, and SportsMOT show consistent improvements over TrackTrack in association accuracy and identity consistency. SHUTrack achieves HOTA scores of 67.8, 66.4, and 76.5 on the three benchmarks, respectively, with higher IDF1 and fewer identity switches on all three test sets.
+Online multi-object tracking relies on matched detections to continually update track states. However, a detection that supports the current association may still cause a harmful update. An inaccurate bounding box or a corrupted appearance feature can affect the track state and influence later predictions and associations. The same detection may also benefit one state while harming another, making association acceptance insufficient to determine how it should update a track. To address this problem, we propose SHUTrack, a framework that learns to suppress harmful state updates after association. Its central idea is to assess a matched detection by the consequences of using it to update the existing track state. During training, SHUTrack compares the subsequent effects of updating the state and retaining the state before that update, providing a learning signal for identifying potentially harmful updates. Guided by this signal, it controls motion and appearance updates separately using the available track context. This allows the tracker to limit harmful updates while preserving its ability to adapt to target changes. Experiments on MOT17, MOT20, and SportsMOT demonstrate consistent improvements over TrackTrack, with HOTA scores of 67.8, 66.4, and 76.5, respectively. These results support learned state-update control as an effective way to maintain reliable trajectories across different tracking conditions.
 \end{abstract}
 
 \begin{keywords}
-Online Multi-Object Tracking \sep State Assimilation \sep Counterfactual Supervision \sep Appearance Memory \sep Temporal Reliability
+Online Multi-Object Tracking\sep State Update Control\sep Counterfactual Supervision\sep Temporal Context\sep Reliability Estimation
 \end{keywords}
 
 \maketitle
 
 \section{Introduction}
-Multi-object tracking (MOT) aims to localize multiple objects in video while preserving their identities over time. It supports applications including autonomous driving \cite{geiger2012we}, intelligent surveillance \cite{yin2019large}, sports analytics \cite{cui2023sportsmot}, and human behavior analysis \cite{kong2022human}. Tracking-by-detection (TBD) remains the dominant online formulation: a detector first produces frame-level observations, and the tracker links them into trajectories using motion, appearance, and geometric evidence \cite{bewley2016simple,wojke2017simple,zhang2022bytetrack,cao2023observation,aharon2022bot}. As object detectors have improved, the main difficulty has increasingly shifted from localizing an object in one frame to preserving a reliable state through occlusion, crowding, abrupt motion, and ambiguous appearance.
 
-Most online trackers maintain at least two recursive forms of track memory. A Kalman state summarizes location, scale, velocity, and their uncertainty, while an appearance prototype aggregates ReID observations for later identity association. Once a detection is assigned to a track, the standard implementation updates both memories. The Kalman filter corrects its prediction with the detection box, and an exponential moving average (EMA) incorporates the detection embedding into the track prototype. This design is efficient and usually appropriate, but it embeds a strong assumption: if an association has been accepted, then the associated observation is sufficiently reliable to be written into every state.
+Multi-object tracking (MOT) aims to localize multiple objects in video and maintain their identities over time. It provides the temporal information needed for autonomous driving \cite{geiger2012we}, intelligent surveillance \cite{yin2019large}, sports analytics \cite{cui2023sportsmot}, and human behavior analysis \cite{kong2022human}. Tracking-by-detection (TBD) methods first detect objects in each frame and then associate detections across frames to form trajectories \cite{bewley2016simple,wojke2017simple,zhang2022bytetrack}. As a trajectory develops, matched detections continually update the information used to track the target. Maintaining reliable trajectories therefore requires careful use of these detections, especially when occlusion, crowding, and target changes make their location or appearance uncertain.
 
-Acceptance and reliability are not equivalent. Association chooses the best available assignment under the current candidate set and threshold; it does not guarantee that the selected box is accurately localized or that its feature is visually clean. In a crowded scene, the accepted box can be shifted toward a neighbor. Under partial occlusion, the ReID feature can contain foreground from another identity. During abrupt motion, an otherwise correct match can still be inconsistent with the short-term trajectory model. If such an observation is fully assimilated, the effect does not end at the current frame. A corrupted Kalman posterior biases the next prediction and changes later geometric costs, while a corrupted appearance prototype affects future ReID distances. The resulting error can therefore propagate even when the original association was technically correct.
+State updating connects current detections with future tracking decisions. In many online TBD trackers, a motion state describes the target's location and movement, while an appearance state stores identity information from previous detections. These states support later predictions and associations and must be updated as the target changes. Each update contributes to the information accumulated along the trajectory and shapes how later detections are interpreted. SORT \cite{bewley2016simple} and DeepSORT \cite{wojke2017simple} established efficient tracking pipelines based on motion estimation and appearance matching. Subsequent methods improve the use of detections within these pipelines: ByteTrack \cite{zhang2022bytetrack} recovers low-confidence detections, OC-SORT \cite{cao2023observation} uses detection history to improve motion estimation, and StrongSORT \cite{du2023strongsort} and BoT-SORT \cite{aharon2022bot} strengthen appearance and motion handling. TrackTrack \cite{shim2025focusing} further considers detection candidates from the perspective of existing tracks. These advances help trackers obtain useful information from available detections. However, a detection selected for association can still contain information that damages the state it updates. Once that information is retained, its influence can continue through later frames, even if the current detection was assigned to the correct target.
+
+Existing methods reduce unreliable updates through detection confidence and historical context. ConfTrack \cite{jung2024conftrack} adjusts filtering according to detection confidence, while Deep OC-SORT \cite{maggiolino2023deep} uses confidence to adapt appearance updates. MeMOT \cite{cai2022memot} and MeMOTR \cite{gao2023memotr} use learned memory to make better use of historical information. These approaches help trackers handle differences in detection quality and temporal evidence. Yet the quality of a detection does not directly determine the consequence of updating a particular track state. A high-confidence detection may damage a well-maintained state, whereas a low-confidence detection may help correct a state that has drifted. Historical consistency is also ambiguous when a real change in target motion or appearance conflicts with earlier detections. This motivates learning to assess a matched detection through its update consequences: whether using it improves the subsequent state compared with retaining the state before that update.
 
 \begin{figure}[pos=!ht]
     \centering
     \includegraphics[width=\linewidth]{figures/fig1_motivation_v8.png}
-    \caption{Conceptual comparison of post-association state assimilation. Conventional trackers apply an accepted observation directly to both the motion state and the appearance memory. DUETTrack instead estimates separate assimilation strengths for the two updates. The clock-like dials denote relative update strength rather than time or calibrated probability.}
+    \caption{Conceptual illustration of post-association state updates. The host tracker applies its standard motion and appearance updates to a matched detection. SHUTrack separately controls the two updates to limit their potentially harmful effects. The dials represent relative update strength, illustrating that motion and appearance updates can be controlled independently.}
     \label{fig:motivation}
 \end{figure}
 
-Fig.~\ref{fig:motivation} contrasts the two post-association update strategies. Conventional trackers perform full motion and appearance updates once a detection is accepted. DUETTrack preserves the accepted association but regulates how strongly that observation enters the motion state and appearance memory. The unequal dial settings illustrate that the two strengths need not agree: a well-localized but heavily occluded detection may be useful for motion correction and harmful to the appearance prototype, while a slightly displaced box may retain a clean identity feature but be unsuitable for geometric assimilation.
+Fig.~\ref{fig:motivation} illustrates the distinction between accepting a detection and controlling its state updates. The same matched detection can require different update strengths for motion and appearance. For example, under partial occlusion, an accurate bounding box may support motion estimation while the appearance feature contains information from another person. Reducing the appearance update can protect the appearance state while preserving the useful motion update. Conversely, a shifted bounding box may provide an unreliable motion update even when its appearance feature remains useful. A harmful update can bias the evidence used for the next association and make a short detection error affect a longer part of the trajectory. Applying the same response to both states can either retain harmful information or discard useful information. These cases motivate separate update decisions for the two states, with suppression guided by the effect of each update on the existing track.
 
-Existing trackers primarily improve what happens before or during association. ByteTrack \cite{zhang2022bytetrack} recovers low-confidence detections, OC-SORT \cite{cao2023observation} emphasizes observation-centric motion correction, StrongSORT \cite{du2023strongsort} and BoT-SORT \cite{aharon2022bot} enhance appearance and camera-motion handling, and TrackTrack \cite{shim2025focusing} reorganizes candidate utilization from the track perspective. Other approaches estimate detection uncertainty \cite{jung2024conftrack,solano2024utrack}, learn trajectory dynamics \cite{xiao2024motiontrack,lv2024diffmot,hu2026trackssm}, or maintain richer temporal memories \cite{cai2022memot,gao2023memotr}. These developments improve candidate generation, matching, or state prediction. Nevertheless, a focused question remains underexplored: after a match has already been accepted, how much future value does its box and appearance feature provide to the corresponding recursive state?
+To address this problem, we propose SHUTrack, which learns to suppress harmful state updates after association. During training, it compares the subsequent effects of updating a track state with a matched detection and retaining the state before that update. This provides a learning signal for assessing whether the detection should influence the state. The Harm-Aware Update Controller (HUC) uses recent track history to make separate update decisions for motion and appearance. The Reliability-Guided Update Calibrator (RUC) then refines these decisions according to the reliability of the available evidence. Together, they reduce the influence of detections that may harm the corresponding state while allowing useful updates to follow target changes. SHUTrack retains the current match and applies its update decisions before the next tracking step. Online decisions use only current and past information.
 
-We address this question with DUETTrack, a utility-guided dual-state assimilation framework. Acting on accepted associations, DUETTrack estimates two continuous coefficients. The first controls interpolation between the Kalman prediction and its full measurement posterior; the second controls interpolation between the stored appearance prototype and its updated estimate. This formulation separates observation ownership from observation utility, allowing a tracker to retain a match while limiting its influence on future states.
+Through this design, SHUTrack makes the effect of a matched detection on future track states an explicit part of online tracking. We evaluate the framework on MOT17 \cite{dendorfer2021motchallenge}, MOT20 \cite{dendorfer2020mot20}, and SportsMOT \cite{cui2023sportsmot}, covering pedestrian scenes, dense crowds, and fast team-sport motion. Experiments with TrackTrack as the host demonstrate consistent improvements in tracking performance and identity continuity across the three benchmarks. Component ablations further examine the roles of motion and appearance update control and reliability-guided refinement. These results support harmful-update suppression as a useful approach to maintaining reliable trajectories.
 
-The central challenge is supervision. A current detection can look plausible but still harm future tracking, and no direct annotation states whether its motion or appearance should be written. We therefore construct paired offline rollouts from the same pre-assimilation state. One branch fully writes the current observation and the other holds the existing state; both are propagated using the same future evidence. Their loss difference estimates the local future utility of the write action. Coverage and utility magnitude are used to turn this comparison into conservative soft targets, avoiding brittle binary decisions when the two branches are nearly equivalent or future evidence is incomplete.
-
-DUETTrack contains two learned components. The Counterfactual Utility Estimator (CUE) models recent association, geometry, state, track-status, and appearance-interaction evidence. It combines interpretable policy estimation with a continuous offset to produce two base assimilation coefficients. The Cross-Evidence Calibrator (CEC) independently summarizes recent state--association and appearance-interaction histories, conditions their interaction on reliability evidence, and applies a bounded coefficient adjustment. This division assigns the primary decision to CUE while allowing CEC to make only a contextual local calibration.
-
-Our contributions are summarized as follows.
+Our main contributions are summarized as follows.
 \begin{itemize}
-    \item We formulate post-association tracking as a dual-state assimilation problem in which an accepted detection can contribute differently to the Kalman state and the ReID prototype.
-    \item We introduce paired write-versus-hold rollout supervision that estimates the local future utility of the current observation for the Kalman state and appearance prototype, and converts the estimates into confidence-aware soft targets without using future information online.
-    \item We design CUE and CEC to combine interpretable policy estimation with reliability-aware cross-evidence calibration, yielding independent continuous controls for geometric and appearance-state assimilation.
-    \item On the MOT17, MOT20, and SportsMOT test sets, DUETTrack consistently improves HOTA, AssA, and IDF1 over TrackTrack and reduces identity switches, with the largest fragmentation reduction observed on SportsMOT. A controlled MOT20 perturbation study further shows slower degradation under position and size noise.
+    \item We formulate harmful state updates as a distinct challenge in online multi-object tracking, highlighting how errors in accepted detections can persist through track states and affect subsequent tracking decisions.
+
+    \item We propose learning to assess matched detections by their update consequences. This perspective accounts for the different effects that the same detection can have on track states and provides a basis for selectively suppressing harmful updates.
+
+    \item We present a tracking framework that balances the preservation of reliable track states with adaptation to target changes. Experiments on MOT17, MOT20, and SportsMOT demonstrate its effectiveness in maintaining identity continuity across different tracking conditions.
 \end{itemize}
 
 \section{Related Work}
 \subsection{Online Multi-Object Tracking}
-Tracking-by-detection decomposes MOT into frame-level detection and temporal association, retaining a modular online pipeline that can inherit advances in either component \cite{ciaparrone2020deep}. SORT \cite{bewley2016simple} established a lightweight baseline with Kalman prediction and Hungarian assignment \cite{kuhn1955hungarian}; DeepSORT \cite{wojke2017simple} added appearance embeddings and a matching cascade; and ByteTrack \cite{zhang2022bytetrack} recovered useful low-confidence detections through a second association stage.
+Tracking-by-detection is widely used in online MOT because it separates object detection from temporal association and supports efficient tracking pipelines \cite{ciaparrone2020deep}. SORT \cite{bewley2016simple} combines Kalman prediction with Hungarian assignment, while DeepSORT \cite{wojke2017simple} introduces appearance features to improve identity matching. BoT-SORT and StrongSORT strengthen this framework through improved motion handling and appearance modeling \cite{aharon2022bot,du2023strongsort}. ByteTrack \cite{zhang2022bytetrack} recovers unmatched tracks using low-confidence detections, showing that detections with uncertain scores can still support trajectory continuity. More recent methods improve the evidence used for association. SparseTrack \cite{liu2025sparsetrack} decomposes crowded scenes using pseudo-depth, and FineTrack \cite{ren2023focus} learns fine-grained appearance representations. AIPT \cite{zhang2024aipt} and RccTrack \cite{zhang2025robust} improve motion and appearance handling under camera movement and target ambiguity. TrackTrack \cite{shim2025focusing} further organizes high-confidence, low-confidence, and redundant detection candidates from the perspective of existing tracks.
 
-Recent trackers improve the assignment boundary through observation-centric motion \cite{cao2023observation,maggiolino2023deep}, camera compensation and appearance matching \cite{aharon2022bot}, stronger embeddings and post-processing \cite{du2023strongsort}, complementary weak cues \cite{yang2024hybrid}, pseudo-depth decomposition \cite{liu2025sparsetrack}, and fine-grained visual representations \cite{ren2023focus}. AIPT \cite{zhang2024aipt} and RccTrack \cite{zhang2025robust} further address confusing targets and camera motion. End-to-end query trackers such as TrackFormer \cite{meinhardt2022trackformer} and MOTR \cite{zeng2022motr} instead couple detection, association, and recurrent query revision.
+Temporal modeling provides another way to improve tracking. MotionTrack \cite{xiao2024motiontrack} learns trajectory prediction from historical motion, DiffMOT \cite{lv2024diffmot} models nonlinear motion through diffusion, and MambaTrack and TrackSSM use state-space models to capture temporal dependencies \cite{xiao2024mambatrack,hu2026trackssm}. Query-based methods such as TrackFormer \cite{meinhardt2022trackformer} and MOTR \cite{zeng2022motr} integrate detection and association through representations propagated across frames. These approaches improve how a tracker predicts targets or links them over time. In modular TBD trackers, matched detections also update the states used in subsequent frames, creating a further opportunity to improve tracking beyond the current assignment. SHUTrack focuses on this stage: it learns how strongly a matched detection should update the motion and appearance states according to the potential consequences of that update.
 
-TrackTrack \cite{shim2025focusing}, our host tracker, organizes candidate utilization from the track perspective and jointly considers high-confidence, low-confidence, and redundant detections. DUETTrack leaves this construction and the resulting assignment unchanged. It operates at the exposed post-association boundary of a modular tracker: association decides which detection belongs to a track, whereas DUETTrack decides how strongly the accepted observation should enter the recursive states used by later associations.
+\subsection{Track State Updating}
+Motion state updates combine a track prediction with a newly matched detection. The Kalman filter \cite{kalman1960new} controls their relative influence through uncertainty estimates. BoT-SORT \cite{aharon2022bot} improves motion handling with camera-motion compensation, while OC-SORT \cite{cao2023observation} uses detection history to correct accumulated prediction errors after occlusion. Other methods directly adjust the influence of detections during filtering. The adaptive Kalman filter in GIAOTracker \cite{du2021giaotracker} scales measurement uncertainty according to detection confidence, and ConfTrack \cite{jung2024conftrack} also uses confidence to limit unreliable corrections. Deep LG-Track \cite{meng2025deep} considers both detection confidence and trajectory disappearance when adjusting the filter. These methods show that the strength of a motion update should depend on the reliability of the detection and the existing prediction. However, these confidence-based rules do not directly compare the later effects of applying and skipping the current update.
 
-\subsection{Motion State Estimation}
-The Kalman filter \cite{kalman1960new} remains a standard motion backbone for online MOT because it provides efficient recursive prediction and measurement correction. SORT-style systems propagate position, scale, velocity, and covariance before matching and apply a measurement update after assignment. Subsequent methods improve this state estimator through camera compensation \cite{aharon2022bot}, observation re-updating \cite{cao2023observation}, ground-plane projection \cite{yi2024ucmctrack}, or confidence-dependent measurement noise \cite{jung2024conftrack}.
+Appearance state updates face a similar need to balance adaptation with the preservation of identity information. DeepSORT \cite{wojke2017simple} maintains a gallery of appearance features, whereas StrongSORT \cite{du2023strongsort} uses an exponential moving average to maintain a compact appearance state. Deep OC-SORT \cite{maggiolino2023deep} adapts the update weight using detection confidence. Deep LG-Track \cite{meng2025deep} further accounts for localization quality and appearance clarity when combining historical and current features. Learned memory methods, including multi-track pooling \cite{kim2021discriminative}, MeMOT \cite{cai2022memot}, and MeMOTR \cite{gao2023memotr}, use temporal information to maintain more informative identity representations. These approaches reduce dependence on a single frame, but the reliability of a current feature remains important because its influence can persist in the stored appearance state.
 
-Learned estimators can augment analytical filtering when the assumed dynamics are incomplete, as illustrated by KalmanNet \cite{revach2022kalmannet}. In MOT, recurrent, Transformer, state-space, and diffusion models have been used to improve trajectory prediction \cite{han2022mat,xiao2024motiontrack,xiao2024mambatrack,hu2026trackssm,lv2024diffmot,luo2024diffusiontrack}. These approaches primarily improve the prediction or uncertainty model. DUETTrack instead retains TrackTrack's full Kalman posterior and learns a bounded interpolation between that posterior and the preceding prediction, preserving both host endpoints exactly.
-
-\subsection{Appearance Memory}
-Online trackers must also preserve identity evidence across frames. DeepSORT stores a gallery of recent descriptors \cite{wojke2017simple}, whereas many efficient systems recursively average matched embeddings into a compact EMA prototype. StrongSORT and BoT-SORT improve the descriptor or its use in matching, and FineTrack \cite{ren2023focus} learns more discriminative local and global features under occlusion.
-
-Other work makes memory itself more expressive. Multi-track pooling jointly updates appearance memories in the presence of similar targets \cite{kim2021discriminative}; UTM aggregates identity-aware information across detection, embedding, and tracking components \cite{you2023utm}; and MeMOT and MeMOTR retain object information through learned temporal memories \cite{cai2022memot,gao2023memotr}. Polycepta \cite{nagy2026polycepta} further treats appearance as a recursive object-centric state. These methods motivate richer identity representations, but a matched feature can still be occluded or mixed with a neighbor. DUETTrack therefore controls whether the host EMA candidate should be stored, rather than replacing the ReID encoder or memory representation.
-
-\subsection{Reliability-Aware Tracking}
-Motion and appearance reliability are commonly used to improve the current association. Neural Gating \cite{kim2018neuralgating} learns to combine the two cues, ConfTrack \cite{jung2024conftrack} adapts filtering to detection confidence, and UTrack \cite{solano2024utrack} models uncertain detections during matching. U2MOT \cite{liu2023uncertainty} uses association uncertainty to rectify risky pseudo-tracklets, while path-consistency supervision enforces stable associations under different temporal observation paths \cite{lu2024self}. Together, these studies show that cue reliability is contextual rather than a fixed hand-crafted weight.
-
-Reliability for matching is nevertheless different from utility for recursive storage. A high-confidence box can be displaced during overlap, and a correctly localized detection can yield a contaminated ReID crop. Conversely, an uncertain observation can be useful when it corrects a drifting prediction. DUETTrack therefore uses confidence and ambiguity as evidence, not as write targets, and predicts distinct Kalman-state and appearance-prototype coefficients. Its Cross-Evidence Calibrator further compares the recent state--association and appearance-interaction histories, but it only adjusts the already selected post-association action.
+Learning update behavior has also been studied in single-object tracking. UpdateNet \cite{zhang2019learning} learns a template update function from initial, historical, and current templates. Meta-Updater \cite{dai2020high} uses temporal geometric, discriminative, and appearance cues to decide whether to update the tracker. Its training labels are based on current localization quality. These studies provide important precedents for learned updates, while the confidence-based MOT methods above already reduce the influence of unreliable detections. SHUTrack builds on this line of work by learning from the subsequent effects of alternative update choices. It compares updating a state with retaining that state before the update, providing separate supervision for motion and appearance. A detection can consequently receive different update strengths for the two states, with suppression guided by its estimated effect on subsequent state quality.
 
 \subsection{Counterfactual Supervision}
-Counterfactual learning evaluates how an outcome would change under an alternative action. In sequential decision problems, counterfactually guided policy search uses a structural model to compare alternative actions on logged trajectories \cite{buesing2018woulda}. Learning using privileged information similarly formalizes training with signals that are unavailable at deployment \cite{vapnik2009new}. Both ideas are relevant to our use of future evidence, but DUETTrack adopts a narrower supervised construction rather than a general causal or reinforcement-learning formulation.
+Counterfactual reasoning considers how an outcome would change under an alternative action. In sequential decision making, counterfactually guided policy search uses structural causal models and recorded experience to evaluate alternative policies \cite{buesing2018woulda}. This offers a relevant principle for update control: the value of an action can be assessed by comparing its consequences with those of another choice. A separate connection is learning using privileged information \cite{vapnik2009new}, where information available during training helps a model that operates without that information at deployment. These ideas concern different aspects of supervision: comparing alternative outcomes and learning from additional training information.
 
-For every training event, we branch from the same pre-assimilation state, apply one of two fixed actions---write or hold---and propagate both branches with identical future evidence. Their loss difference supplies a local utility target for the current state write. We do not infer unobserved outcomes from observational data, optimize an online policy, or rerun global assignment under each action. Future annotations are used only to construct offline targets; at test time, CUE and CEC receive a causal six-event history. This controlled scope prevents future information from entering online inference and avoids claiming a globally optimal counterfactual tracker.
+SHUTrack applies these ideas to a local state-update decision. During offline training, updating and retaining the state are evaluated from the same starting state using shared future evidence. Their subsequent state errors provide supervision for learning when an update may be harmful. The comparison is confined to the selected state update under fixed future evidence; it does not estimate the outcome of rerunning the full tracker with different associations. Future annotations are used to construct training targets, while online update control uses only current and past track information. This connects the supervision to the consequences of updating a particular state and preserves the online tracking setting.
 
 \section{Methodology}
-Let track $i$ at frame $t$ have a predicted Kalman state $(\bm{\mu}_{t}^{-},\bm{P}_{t}^{-})$ and a stored appearance prototype $\bm{f}_{t}^{-}$. TrackTrack assigns a detection $d_t=(\bm{z}_t,\bm{q}_t,s_t)$, where $\bm{z}_t$ is the box measurement, $\bm{q}_t$ is its ReID feature, and $s_t$ is its confidence. DUETTrack estimates $\gfinal=[\gm,\ga]\in[0,1]^2$ after this assignment. The two coefficients regulate how much of the full Kalman-state and EMA-prototype updates is assimilated.
-
 \subsection{Framework Overview}
-Fig.~\ref{fig:framework} places DUETTrack inside the unchanged TrackTrack pipeline. Detection, ReID extraction, candidate construction, cost computation, assignment, and track management are inherited from TrackTrack. We define a mature track as one in the tracked or lost state whose host history contains at least six entries. For each mature track, the accepted match and the track's preceding events form a left-padded causal window of length six. Matched events contain both track and detection information; unmatched events contain the track-side state and an explicit no-detection pattern. Reset masks prevent a window from crossing a terminated or reinitialized trajectory.
+SHUTrack learns to control how matched detections update the states used for later tracking. As shown in Fig.~\ref{fig:framework}, the tracker first predicts track locations and associates detections with existing tracks. For each matched track with enough history, SHUTrack forms an event from the current detection, the state before its update, and the matching information. The recent event history helps determine how strongly the detection should influence the motion and appearance states.
+
+The Harm-Aware Update Controller (HUC) produces two initial update weights from this history. The Reliability-Guided Update Calibrator (RUC) refines them by relating the separate evidence histories to the reliability of the current decision. The resulting weights control the two state updates independently. During training, supervision is obtained by comparing the consequences of applying an update and retaining the state before that update. Online inference requires only current and past information.
 
 \begin{figure}[pos=!ht]
     \centering
     \includegraphics[width=\linewidth]{figures/fig2_framework_v12_cec.png}
-    \caption{Framework overview of DUETTrack. An accepted TrackTrack pair is recorded as state--association and ReID-interaction evidence in a six-event causal memory. CUE produces the primary motion and appearance assimilation coefficients, CEC refines them using reliability-aware cross-evidence, and the resulting coefficients independently control the Kalman-state and EMA-prototype updates. Figs.~\ref{fig:cue} and \ref{fig:cec} detail the two learned components.}
+    \caption{Overview of SHUTrack. After association, the matched detection and the track state before updating form an event in the recent track history. HUC predicts separate motion and appearance update weights, and RUC refines them using history and reliability information. The final weights control the state updates used for later tracking. Supervision from update consequences is constructed offline.}
     \label{fig:framework}
 \end{figure}
 
-The event is recorded before assimilation, so its track-side fields describe the state that produced the association rather than the consequence of the current decision. Per-track buffers are left-padded and use validity and reset masks. An unmatched event occupies a temporal position, allowing a later match to reveal a return after a gap.
+Update control is applied to tracks in the tracked or lost state with at least $T$ matched detections in their history, where $T$ is the input context length. Each input window contains the current event and up to $T-1$ past events, with shorter histories left-padded and masked. Unmatched events retain track information and indicate that no detection is available. This distinguishes a continuous sequence of matches from a return after a gap.
 
-For motion, we first compute the full Kalman measurement posterior using the original update rule,
+\subsection{State Update Control and Supervision}
+\paragraph{Motion and appearance updates.}
+For clarity, we omit the track index. Before updating at frame $t$, the track has a predicted motion state $(\bm{\mu}_t^{-},\bm{P}_t^{-})$ and an appearance state $\bm{f}_t^{-}$. Its matched detection is $d_t=(\bm{z}_t,\bm{q}_t,s_t)$, where $\bm{z}_t$ is the bounding-box measurement, $\bm{q}_t$ is the appearance feature, and $s_t$ is the detection confidence. SHUTrack predicts $\gfinal=[\gm,\ga]\in[0,1]^2$.
+
+The Kalman filter first computes its full update:
 \begin{equation}
-(\bm{\mu}_{t}^{+},\bm{P}_{t}^{+})
-=
-\operatorname{KFUpdate}(\bm{\mu}_{t}^{-},\bm{P}_{t}^{-},\bm{z}_t,s_t).
+(\bm{\mu}_t^{+},\bm{P}_t^{+})
+=\operatorname{KFUpdate}(\bm{\mu}_t^{-},\bm{P}_t^{-},\bm{z}_t,s_t).
 \label{eq:full_kf}
 \end{equation}
-Instead of committing to this posterior, DUETTrack interpolates from the prediction:
+The motion weight then controls the change from the prediction to this updated state:
 \begin{align}
-\bm{\mu}_{t}
-&=
-\bm{\mu}_{t}^{-}
-+
-\gm(\bm{\mu}_{t}^{+}-\bm{\mu}_{t}^{-}), \\
-\bm{P}_{t}
-&=
-(1-\gm)\bm{P}_{t}^{-}
-+
-\gm\bm{P}_{t}^{+}.
+\bm{\mu}_t &= \bm{\mu}_t^{-}+\gm(\bm{\mu}_t^{+}-\bm{\mu}_t^{-}),\\
+\bm{P}_t &= (1-\gm)\bm{P}_t^{-}+\gm\bm{P}_t^{+}.
 \label{eq:motion_assimilation}
 \end{align}
-The covariance is symmetrized after interpolation. The effective history box is analogously formed between the predicted box and the accepted detection box. Therefore, $\gm=0$ exactly preserves the prediction, $\gm=1$ recovers the original full update, and intermediate values provide continuous correction.
+The covariance is symmetrized after interpolation. The box stored in track history is interpolated between the predicted box and the detection box using the same weight, and the velocity cues are updated from this effective box. Thus, motion update control also affects the geometric history used in later associations.
 
-Because $\bm{P}_{t}^{-}$ and $\bm{P}_{t}^{+}$ are positive semidefinite, their convex combination remains valid; symmetrization removes numerical asymmetry. The endpoint at $\gm=1$ is exactly the unmodified TrackTrack update, so the learned action is a deviation from the host rather than a replacement motion model.
-
-For appearance, TrackTrack's confidence-aware EMA first produces the full candidate prototype
+For appearance, let the unnormalized candidate produced by an exponential moving average (EMA) be
 \begin{align}
-\beta_t &= \alpha +(1-\alpha)(1-s_t), \\
-\bm{f}_{t}^{+}
-&=
-\operatorname{norm}\!\left(
-\beta_t\bm{f}_{t}^{-}+(1-\beta_t)\bm{q}_t
-\right),
+\beta_t &= \alpha+(1-\alpha)(1-s_t),\\
+\bar{\bm{f}}_t^{+} &= \beta_t\bm{f}_t^{-}+(1-\beta_t)\bm{q}_t,
 \label{eq:full_ema}
 \end{align}
-where $\alpha$ denotes the host appearance decay. DUETTrack then applies
+where $\alpha$ is the appearance decay factor. The controlled update is
 \begin{equation}
-\bm{f}_{t}
-=
-\operatorname{norm}\!\left(
-(1-\ga)\bm{f}_{t}^{-}+\ga\bm{f}_{t}^{+}
+\bm{f}_t=\operatorname{norm}\!\left(
+(1-\ga)\bm{f}_t^{-}+\ga\bar{\bm{f}}_t^{+}
 \right).
 \label{eq:appearance_assimilation}
 \end{equation}
-The endpoints again have exact semantics: $\ga=0$ retains the old prototype and $\ga=1$ reproduces the host EMA. The Kalman-state and EMA-prototype coefficients are not tied because localization and visual quality can diverge for the same detection.
+Here $\operatorname{norm}$ means $\ell_2$ normalization, applied after the weighted combination. In implementation, a zero weight directly retains the stored feature, and a weight of one applies the full EMA update. For both states, zero preserves the state before the current update, one applies the full update, and intermediate values reduce its influence. Separate weights allow a matched detection to contribute differently to motion and appearance.
 
-The second interpolation targets TrackTrack's complete score-aware EMA candidate rather than the raw detection feature. It thus preserves the host confidence rule inside $\bm{f}_{t}^{+}$, while $\ga$ determines whether that candidate should enter long-term memory.
+\paragraph{Comparing update consequences.}
+Tracking annotations specify target locations and identities, but do not directly label whether a particular state update is beneficial. We construct this supervision offline using paired rollouts. For each state type $r\in\{m,a\}$, two branches start from the same state $S_{t,r}^{-}$. The update branch, denoted $W$, applies the full current update; the hold branch, denoted $H$, retains $S_{t,r}^{-}$. Both then follow the same update rules and receive the same future detection evidence over the next $K$ frames.
 
-DUETTrack is applied only to accepted pairs of mature tracks. If the current event is unmatched, both coefficients and both CEC adjustments are set to zero; the unmatched event is nevertheless appended to the causal buffer so that missed observations and temporal gaps remain visible to future decisions. Newly initialized tracks follow TrackTrack's original initialization because they lack sufficient history for utility estimation.
+The target identity is determined from matches to ground truth before the current event. Future detections are selected by their overlap with this target's ground-truth box, subject to $\theta_{\mathrm{match}}$. Ground truth guides detection selection and loss evaluation, while the state updates use detector outputs. This comparison measures the local effect of the current update under shared future evidence; it does not rerun global association.
 
-The action space contains no reject or reassignment operation. DUETTrack cannot repair an already incorrect current-frame ID, but it can limit how a noisy observation propagates afterward. This restriction also prevents it from silently changing detection recall or association thresholds.
-
-\subsection{Counterfactual Utility Estimator}
-CUE combines an offline target-construction procedure with a causal estimator used at test time. No benchmark annotation directly specifies the desired values of $\gm$ and $\ga$. We therefore construct training targets by comparing two controlled actions from the same pre-assimilation state: \emph{write}, which applies the current full update, and \emph{hold}, which skips it. The remainder of each rollout is shared. This paired construction attributes the loss difference to the current action while avoiding a comparison between unrelated trajectories.
-
-Formally, for modality $r\in\{m,a\}$, the branches start from identical $S_{t,r}^{-}$ and differ only through $S_{t,r}^{W}=\operatorname{Write}(S_{t,r}^{-},d_t)$ and $S_{t,r}^{H}=S_{t,r}^{-}$. Subsequent prediction, camera compensation, observations, and update rules are shared. This estimates a local intervention effect; global assignment is not rerun, because doing so would entangle the action with other trajectories and track-management outcomes.
-
-\begin{figure}[pos=!ht]
-    \centering
-    \includegraphics[width=\linewidth]{figures/fig3_cue_v12_offset.png}
-    \caption{Counterfactual Utility Estimator. (a) The offline teacher compares write and hold from a shared pre-state under identical future evidence, then derives safe assimilation targets and soft policy supervision. (b) The online estimator separately encodes six causal state--association and ReID-interaction events before temporal modeling. Policy and offset outputs form the two base coefficients, while confidence and risk outputs provide explicit evidence to CEC.}
-    \label{fig:cue}
-\end{figure}
-
-\paragraph{Kalman-state utility.}
-For a matched training event, the write branch applies Eq.~\eqref{eq:full_kf}; the hold branch retains $(\bm{\mu}_{t}^{-},\bm{P}_{t}^{-})$. At the current frame and up to $K$ future frames, the predicted box $\hat{\bm{b}}_{\tau}$ is compared with the target ground-truth box $\bm{b}_{\tau}^{\mathrm{gt}}$ using
+\paragraph{Motion supervision.}
+At each future step, both branches undergo the same camera compensation and prediction operations. Their predicted boxes are evaluated before using that step's selected detection for an update. The current-frame states immediately after the update or hold action are also evaluated. For branch $b\in\{W,H\}$, the motion loss is
 \begin{equation}
-\ell_m(\tau)
-=
-1-\operatorname{IoU}(\hat{\bm{b}}_{\tau},\bm{b}_{\tau}^{\mathrm{gt}})
-+
-\lambda_{\mathrm{loc}}\ell_{\mathrm{L1,norm}}
-(\hat{\bm{b}}_{\tau},\bm{b}_{\tau}^{\mathrm{gt}}).
+\ell_m^b(\tau)=
+1-\operatorname{IoU}(\hat{\bm{b}}_\tau^b,\bm{b}_\tau^{\mathrm{gt}})
++\lambda_{\mathrm{loc}}\ell_{\mathrm{L1,norm}}
+(\hat{\bm{b}}_\tau^b,\bm{b}_\tau^{\mathrm{gt}}).
 \label{eq:motion_loss}
 \end{equation}
-The normalized $\ell_1$ term divides horizontal and vertical coordinate errors by the ground-truth width and height, and $\lambda_{\mathrm{loc}}$ balances it against the overlap term. At each future step, both branches receive the same camera warp, Kalman prediction, and optional detector observation. The future observation is the detector candidate with the highest IoU above $\theta_{\mathrm{match}}$ to the target ground truth; ground-truth boxes are used for loss only and are never inserted as Kalman measurements. Summing valid frames yields $L_m^{W}$ and $L_m^{H}$.
-
-IoU captures overlap and scale, whereas normalized $\ell_1$ remains informative after overlap vanishes and avoids favoring large objects. A short horizon keeps the current action as the dominant difference between branches.
-
-\paragraph{Appearance utility.}
-The write branch applies the full EMA in Eq.~\eqref{eq:full_ema}, whereas the hold branch retains $\bm{f}_{t}^{-}$. Both then receive the same future target-aligned detector features through the original EMA. An offline identity prototype $\bm{p}_i$ is constructed from at least $N_{\mathrm{proto}}$ high-quality detections for identity $i$, each with IoU at least $\theta_{\mathrm{proto}}^{\mathrm{IoU}}$ and score at least $\theta_{\mathrm{proto}}^{\mathrm{score}}$. Appearance loss is
+For corner coordinates $(x_1,y_1,x_2,y_2)$, the normalized term is
 \begin{equation}
-\ell_a(\tau)=1-\cos(\bm{f}_{\tau},\bm{p}_i),
+\ell_{\mathrm{L1,norm}}
+=\frac{1}{4}\sum_{j\in\{1,2\}}
+\left(
+\frac{|\hat{x}_j^b-x_j^{\mathrm{gt}}|}{\max(\hat{w}^b,\epsilon)}
++\frac{|\hat{y}_j^b-y_j^{\mathrm{gt}}|}{\max(\hat{h}^b,\epsilon)}
+\right),
+\label{eq:motion_normalization}
+\end{equation}
+where the frame index is omitted, $\hat{w}^b$ and $\hat{h}^b$ are the width and height of that branch's predicted box, and $\epsilon=10^{-6}$. Each branch therefore uses its own predicted box dimensions for normalization. Summing over the current and future frames with valid ground truth gives $L_m^W$ and $L_m^H$.
+
+\paragraph{Appearance supervision.}
+We construct a fixed offline identity prototype $\bm{p}_i$ from the training sequence. Candidate features must satisfy the detection-confidence and ground-truth-overlap thresholds $\theta_{\mathrm{proto}}^{\mathrm{score}}$ and $\theta_{\mathrm{proto}}^{\mathrm{IoU}}$, with at least $N_{\mathrm{proto}}$ candidates available. Features are individually normalized and averaged to obtain an initial normalized mean. We retain the $\lceil0.7N\rceil$ features most similar to that mean, then average and normalize them again to obtain $\bm{p}_i$. This is the standard prototype construction: a current detection that meets the selection criteria can participate in the prototype.
+
+The update branch starts with the normalized full EMA candidate, while the hold branch retains the existing appearance state. Subsequent steps use the same selected detection features and the EMA rule. We evaluate the current state and the states after later updates using
+\begin{equation}
+\ell_a^b(\tau)=1-\cos(\bm{f}_\tau^b,\bm{p}_i).
 \label{eq:appearance_loss}
 \end{equation}
-which produces $L_a^{W}$ and $L_a^{H}$ over valid frames. Target identity is resolved from observations preceding the current event; the current detection is not used to decide which identity the track represents.
+Losses are summed over frames with valid target ground truth to obtain $L_a^W$ and $L_a^H$. When a future detection is unavailable, the branch retains its appearance state. Events without a valid identity prototype have no appearance supervision.
 
-The prototype requirement excludes identities with insufficient clean evidence and separates the reference from the feature under evaluation. Including the current detection in $\bm{p}_i$ would artificially favor the write branch through shared noise; the stated thresholds are label safeguards, not test-time filters.
-
-For state type $r\in\{m,a\}$, the write benefit is
+\paragraph{Soft update targets.}
+For each state type, define the benefit of updating as
 \begin{equation}
-B_r=L_r^{H}-L_r^{W}.
+B_r=L_r^H-L_r^W.
 \label{eq:benefit}
 \end{equation}
-A positive benefit means that writing the current observation reduces future loss, while a negative value favors holding the prior state. We first map the benefit to an oracle soft decision
+Positive values favor updating, while negative values indicate that retaining the state produces a lower rollout loss. We map this difference to a soft target:
 \begin{equation}
-y_r^{\mathrm{oracle}}
-=
-\sigma\!\left(\frac{B_r}{\tau_r}\right),
-\qquad
-\tau_r=
-\operatorname{clip}\!\left(
-\operatorname{median}_{B_r\neq0}|B_r|,
-\tau_{\min},\tau_{\max}
+y_r^{\mathrm{oracle}}=\sigma(B_r/\tau_r),\qquad
+\tau_r=\operatorname{clip}\!\left(
+\operatorname{median}_{B_r\ne0}|B_r|,\tau_{\min},\tau_{\max}
 \right).
 \label{eq:oracle_soft}
 \end{equation}
-The confidence of this label combines evidence coverage $\rho_r$ with effect magnitude:
+The temperature is estimated separately for motion and appearance from training benefits. If no nonzero benefits are available, it is set to $\tau_{\max}$.
+
+A small loss difference or incomplete future evidence provides a weak basis for suppressing an update. We therefore weight the target by
 \begin{equation}
-c_r
-=
-\rho_r
-\min\!\left(\frac{|B_r|}{\kappa\tau_r},1\right).
+c_r=\rho_r\min\!\left(\frac{|B_r|}{\kappa\tau_r},1\right),
 \label{eq:label_confidence}
 \end{equation}
-Let $n_m$ denote the number of available target ground-truth boxes over the current frame and the $K$ future frames, and let $n_a$ denote the number of those future frames for which a detector box overlaps the target by more than $\theta_{\mathrm{match}}$. We use $\rho_m=n_m/(K+1)$ and $\rho_a=n_a/K$. The safe target is
+where $\rho_m=n_m/(K+1)$ measures ground-truth coverage over the current and future frames, and $\rho_a=n_a/K$ measures selected-detection coverage over future frames. The final supervision target is
 \begin{equation}
 y_r=c_r y_r^{\mathrm{oracle}}+(1-c_r).
 \label{eq:safe_target}
 \end{equation}
-Thus, weak or incomplete counterfactual evidence falls back toward the host's full update rather than incorrectly suppressing a valid association. Finally, the dual target $\bm{y}=[y_m,y_a]$ is converted into a soft distribution over the five policy prototypes $\bm{p}_k$ using
+This fallback approaches the full update when the comparison is uncertain. Strong suppression therefore requires both a negative update benefit and sufficient supporting evidence. The two targets form $\bm{y}=[y_m,y_a]$; invalid channels are masked during training.
+
+\subsection{Harm-Aware Update Controller}
+HUC learns to predict update strength from the information available when a detection is matched. Fig.~\ref{fig:cue} shows how offline supervision is connected to its online decision. Each event is represented by a structured state--association token and an appearance-interaction token, allowing the controller to consider both the track's condition and its agreement with the current detection.
+
+\begin{figure}[pos=!ht]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig3_cue_v12_offset.png}
+    \caption{Supervision and prediction for the Harm-Aware Update Controller (HUC). (a) Offline update and hold rollouts provide separate motion and appearance targets based on their later state errors and evidence coverage. (b) HUC encodes recent state--association and appearance-interaction evidence to predict two initial update weights. Auxiliary confidence and risk predictions provide reliability information for RUC.}
+    \label{fig:cue}
+\end{figure}
+
+\paragraph{Event and history encoding.}
+The structured input $\bm{s}_t\in\mathbb{R}^{63}$ summarizes association scores and ambiguity, box agreement, motion state and uncertainty, and track history and status. These features describe whether the detection is consistent with the existing track and whether the match is ambiguous. Features are standardized using training-set statistics and mapped through LayerNorm and an MLP to a 64-dimensional token $\bm{v}_t^s$. For unmatched events, detection-dependent fields are set to zero before normalization and a detection-presence indicator identifies the missing input.
+
+For appearance, a shared projection and LayerNorm map the stored feature and detection feature to $\bm{a}_t^{-},\bm{a}_t^d\in\mathbb{R}^{64}$. An MLP encodes their interaction:
 \begin{equation}
-\pi_k^{*}
-=
+\bm{v}_t^a=\operatorname{MLP}_a\!\left(
+[\bm{a}_t^{-},\bm{a}_t^d,
+|\bm{a}_t^{-}-\bm{a}_t^d|,
+\bm{a}_t^{-}\odot\bm{a}_t^d]
+\right).
+\label{eq:appearance_token}
+\end{equation}
+The two tokens are fused into an event embedding $\bm{e}_t$. HUC adds learned position embeddings to the recent event window and uses a Transformer encoder \cite{vaswani2017attention} to obtain the current representation $\bm{h}_t$. Padding masks exclude missing positions, and reset masks prevent the window from crossing a track reset. Every window ends at the current event, so the representation uses no future frames.
+
+\paragraph{Initial update weights.}
+HUC predicts a probability distribution $\bm{\pi}_t$ over five update prototypes:
+\begin{equation}
+\mathcal{P}=\{(1,1),(1,0),(0,1),(0,0),(0.5,0.5)\}.
+\label{eq:policy_set}
+\end{equation}
+The first coordinate controls motion and the second controls appearance. These prototypes represent full updates, updating only one state, retaining both states, and partial updates. A second head predicts a continuous offset $\bm{o}_t$, giving
+\begin{equation}
+\gbase=\operatorname{clip}_{[0,1]}\!\left(
+\sum_{k=1}^{5}\pi_{t,k}\bm{p}_k+
+\delta_{\mathrm{HUC}}\tanh(\bm{o}_t)
+\right).
+\label{eq:cue_gate}
+\end{equation}
+The prototype mixture supplies a structured description of the decision, while the offset adjusts its strength. The output remains continuous. To supervise the policy probabilities, the target $\bm{y}$ is converted to
+\begin{equation}
+\pi_k^*=
 \frac{\exp(-\|\bm{p}_k-\bm{y}\|_2^2/\tau_{\mathrm{policy}})}
 {\sum_j\exp(-\|\bm{p}_j-\bm{y}\|_2^2/\tau_{\mathrm{policy}})}.
 \label{eq:policy_target}
 \end{equation}
-All rollout construction is restricted to training data. Online tracking receives only causal event history and never accesses ground truth, target-aligned future detections, or identity prototypes.
 
-The fallback is intentionally asymmetric: suppressing an observation on weak evidence may prevent recovery, whereas a target near one reproduces the established host. Strong holding therefore requires confident negative benefit. The soft policy target preserves uncertainty by distributing mass among nearby prototypes.
+Two auxiliary heads predict confidence $\bm{c}_t$ and risk $\bm{r}_t^{\mathrm{risk}}$ for use by RUC. Their respective training targets are $[c_m,c_a,\max(c_m,c_a)]$ and $[1-y_m^{\mathrm{oracle}},1-y_a^{\mathrm{oracle}},1-\min(c_m,c_a),|y_m^{\mathrm{oracle}}-y_a^{\mathrm{oracle}}|]$. The event representation is detached before these heads, so auxiliary losses train the heads without changing the representation used for the initial decision.
 
-\paragraph{Causal estimator.}
-CUE converts a causal sequence of track events into a primary dual-state decision, as summarized in Fig.~\ref{fig:cue}(b). Each event has a ReID-interaction branch and a structured state--association branch. The ReID-interaction branch projects the stored track feature and the current detection feature to 64 dimensions using a shared linear layer and LayerNorm. It concatenates the projected track feature, detection feature, their absolute difference, and element-wise product. A $256\!\rightarrow\!128\!\rightarrow\!64$ MLP produces a 64-dimensional appearance interaction token.
-
-The structured state--association branch contains 63 cues in a fixed index order. Indices 0--26 contain seven pairwise scores (IoU similarity and distance, cosine, confidence, angle, raw cost, and final cost), the assignment threshold and normalized round, detection score, a three-way source one-hot, six row-cost and six column-cost statistics, maximum detection overlap, and a detection-presence indicator. Indices 27--54 contain four box residuals, normalized predicted and detected boxes, four size-normalized Kalman velocities, four image-normalized log covariance diagonals, and eight tracker-velocity components. Indices 55--62 contain the current, latest, and three-observation mean scores, clipped normalized history length and observation gap, and a new/tracked/lost one-hot. Each dimension is standardized by its training-set mean and standard deviation, with values below $10^{-8}$ replaced by one. For unmatched events, detection-dependent entries are zero while track-side cues remain available. A LayerNorm and a $63\!\rightarrow\!128\!\rightarrow\!64$ MLP produce the structured context token.
-
-Cost margins and entropy describe assignment ambiguity; geometry and covariance describe motion agreement; track status and observation gap distinguish routine noise from reappearance. The appearance interaction retains both projected endpoints and symmetric comparisons, avoiding dependence on a single cosine distance.
-
-The two tokens are concatenated and fused into a 128-dimensional event embedding $\bm{e}_t$. CUE retains the latest six embeddings, adds learned relative position embeddings, and processes them with a two-layer Transformer encoder with four attention heads and feed-forward dimension 256 \cite{vaswani2017attention}. Left padding is masked, and the representation at the current position summarizes the causal window.
-
-Only the current position is decoded, so the estimator remains causal. The fixed six-event window captures short trends with bounded storage and includes unmatched events so that a returning track is not treated as temporally adjacent to its last clean match.
-
-Instead of directly regressing two unrelated coefficients, CUE predicts a distribution $\bm{\pi}_t$ over five semantically interpretable policies:
-\begin{equation}
-\mathcal{P}
-=
-\{(1,1),(1,0),(0,1),(0,0),(0.5,0.5)\},
-\label{eq:policy_set}
-\end{equation}
-corresponding to full write, Kalman-state only, EMA-prototype only, hold both, and soft caution. It also predicts a two-dimensional unconstrained offset $\bm{o}_t$. The base decision is
-\begin{equation}
-\gbase
-=
-\operatorname{clip}_{[0,1]}
-\left(
-\sum_{k=1}^{5}\pi_{t,k}\bm{p}_k
-+
-\delta_{\mathrm{CUE}}\tanh(\bm{o}_t)
-\right).
-\label{eq:cue_gate}
-\end{equation}
-The policy mixture supplies a structured prior over common dual-state actions, while the bounded offset represents continuous cases between them. This design keeps the output interpretable without forcing hard policy selection.
-
-The prototypes do not discretize the final action: their mixture spans asymmetric cases, and the offset covers intermediate targets. The probabilities also expose whether uncertainty concerns overall caution or disagreement between evidence streams. The ablation study includes direct two-coefficient regression to isolate the value of this structured output.
-
-Two detached auxiliary heads predict a three-dimensional utility-confidence cue $[c_m,c_a,\max(c_m,c_a)]$ and a four-dimensional risk cue $[1-y_m^{\mathrm{oracle}},1-y_a^{\mathrm{oracle}},1-\min(c_m,c_a),|y_m^{\mathrm{oracle}}-y_a^{\mathrm{oracle}}|]$. Detachment prevents these auxiliary objectives from changing the event representation learned by the primary base decision. Their outputs are instead used as explicit reliability evidence by CEC. At an unmatched current event, CUE is overridden by a deterministic hold-both sentinel with zero coefficients.
-
-\subsection{Cross-Evidence Calibrator}
-CUE makes the primary decision from fused event embeddings, but two events with similar current evidence may require different adjustments depending on how structured state--association evidence and ReID interaction evolved in the recent window. CEC therefore revisits the base coefficients using separated histories while remaining subordinate to CUE. We use \emph{cross-evidence} rather than cross-modal because the two streams are learned views of one tracking event, not distinct sensing modalities.
+\subsection{Reliability-Guided Update Calibrator}
+RUC refines the initial decision using the separate evidence histories and the estimated reliability of that decision. As illustrated in Fig.~\ref{fig:cec}, it summarizes the structured state--association tokens and appearance-interaction tokens independently, then relates the summaries through a reliability token. This preserves access to differences between the two histories that may be less explicit in HUC's fused representation.
 
 \begin{figure}[pos=!ht]
     \centering
     \includegraphics[width=\linewidth]{figures/fig4_cec_v12_imagegen.png}
-    \caption{Cross-Evidence Calibrator. State--association and ReID-interaction histories are summarized independently and combined with an explicit reliability context through a three-token interaction. Two state-specific maps then refine the motion/Kalman and appearance/EMA coefficients. Stop-gradient paths preserve CUE as the primary estimator, while the calibrated coefficients remain local adjustments to its base decision.}
+    \caption{Reliability-Guided Update Calibrator (RUC). Separate temporal attention modules summarize state--association and appearance-interaction histories. These summaries interact with a reliability token containing the initial decision, auxiliary predictions, and current structured features. Two output heads produce bounded corrections to the motion and appearance weights. Stop-gradient connections isolate HUC from the calibration losses.}
     \label{fig:cec}
 \end{figure}
 
-As illustrated in Fig.~\ref{fig:cec}, CEC receives the six 64-dimensional structured context tokens as state--association history and the six 64-dimensional interaction tokens as appearance history. Each stream is projected to 128 dimensions and augmented with an evidence-type embedding and a learned relative position embedding. Separate four-head temporal-attention modules use the current token as the query and the causal window as keys and values, producing summaries $\bm{h}_t^s$ and $\bm{h}_t^a$.
-
-An explicit reliability vector concatenates the two base coefficients, five policy probabilities, three auxiliary cue values, four risk values, and the current 63 scalar features:
+Each history is projected to a common feature dimension and augmented with position and evidence-type embeddings. Separate temporal-attention modules use the current token to query the corresponding history, producing summaries $\bm{h}_t^s$ and $\bm{h}_t^a$. The reliability input combines the initial weights, policy probabilities, auxiliary predictions, and current structured features:
 \begin{equation}
 \bm{u}_t=
-\left[
-\gbase,\bm{\pi}_t,\bm{c}_t,\bm{r}_t^{\mathrm{risk}},\bm{s}_t
-\right]\in\mathbb{R}^{77}.
+[\gbase,\bm{\pi}_t,\bm{c}_t,\bm{r}_t^{\mathrm{risk}},\bm{s}_t]
+\in\mathbb{R}^{77}.
 \label{eq:reliability_vector}
 \end{equation}
-A linear projection produces a 128-dimensional reliability token $\bm{h}_t^u$. The three tokens $[\bm{h}_t^s,\bm{h}_t^a,\bm{h}_t^u]$ receive evidence-type embeddings and pass through a one-layer, four-head Transformer with feed-forward dimension 256. Separate calibration maps read the contextualized state--association and appearance positions and produce
+A learned projection maps $\bm{u}_t$ to a reliability token $\bm{h}_t^u$. The three tokens $[\bm{h}_t^s,\bm{h}_t^a,\bm{h}_t^u]$ pass through a Transformer layer with evidence-type embeddings. Separate heads read the resulting state--association and appearance representations:
 \begin{equation}
-\Delta\bm{g}_t
-=
-\delta_{\mathrm{CEC}}\tanh
-\left(
-\left[
-\phi_{\mathrm{KF}}(\tilde{\bm{h}}_t^s),
-\phi_{\mathrm{EMA}}(\tilde{\bm{h}}_t^a)
-\right]
+\Delta\bm{g}_t=\delta_{\mathrm{RUC}}\tanh\!\left(
+[\phi_m(\tilde{\bm{h}}_t^s),\phi_a(\tilde{\bm{h}}_t^a)]
 \right).
 \label{eq:cec_delta}
 \end{equation}
-The final decision is
+The final weights are
 \begin{equation}
-\gfinal
-=
-\operatorname{clip}_{[0,1]}
-\left(\operatorname{stopgrad}(\gbase)+\Delta\bm{g}_t\right).
+\gfinal=\operatorname{clip}_{[0,1]}\!\left(
+\operatorname{stopgrad}(\gbase)+\Delta\bm{g}_t
+\right).
 \label{eq:final_gate}
 \end{equation}
-Zero initialization of the final calibration maps makes CEC start as the identity mapping. The $\pm\delta_{\mathrm{CEC}}$ range prevents the calibrator from replacing the CUE decision and establishes a clear estimator--calibrator hierarchy. All CUE outputs and evidence histories are detached at the CEC boundary, so CUE is optimized by its own supervision and CEC learns only the bounded adjustment.
 
-Separated summaries reveal whether a CUE decision is supported by both evidence streams or dominated by one; stable state--association context and sudden ReID inconsistency can therefore reduce only the EMA-prototype coefficient. The reliability token anchors this interaction to CUE's decision and current ambiguity.
-
-The bound and stopped gradient prevent the stages from co-adapting into mutually cancelling predictors. Zero-initialized calibration maps make initial training follow CUE exactly, and $\delta_{\mathrm{CEC}}$ keeps later calibration local.
+All HUC-produced histories and predictions are detached at the RUC boundary. The final correction layers are initialized to zero, so RUC starts with no change to HUC's output. The bound $\delta_{\mathrm{RUC}}$ limits the change to each weight, while separate output heads allow different corrections for motion and appearance. This design assigns the primary update decision to HUC and trains RUC to make a local refinement.
 
 \subsection{Training and Online Inference}
-Future evidence appears only while constructing the targets in Fig.~\ref{fig:cue}(a). Optimization consumes cached causal event windows and their offline targets, whereas deployment retains only the learned CUE and CEC modules. This separation makes the training signal outcome-oriented without introducing look-ahead at test time.
-
-\paragraph{Optimization objective.}
-For a predicted coefficient vector $\hat{\bm{g}}$ and safe target $\bm{y}$, we define
+\paragraph{Training objective.}
+Offline preprocessing caches event windows and their rollout targets. For a weight prediction $\hat{\bm{g}}$ and target $\bm{y}$, the update loss is
 \begin{equation}
-\mathcal{L}_{g}(\hat{\bm{g}},\bm{y})
-=
-\lambda_{\mathrm{BCE}}
-\operatorname{BCE}(\hat{\bm{g}},\bm{y})
-+
-\lambda_{\mathrm{MSE}}
-\|\hat{\bm{g}}-\bm{y}\|_2^2.
+\mathcal{L}_g(\hat{\bm{g}},\bm{y})=
+\lambda_{\mathrm{BCE}}\operatorname{BCE}(\hat{\bm{g}},\bm{y})
++\lambda_{\mathrm{MSE}}\operatorname{MSE}(\hat{\bm{g}},\bm{y}).
 \label{eq:gate_loss}
 \end{equation}
-Invalid motion or appearance channels are masked in their corresponding losses. CUE is trained with $\mathcal{L}_{g}(\gbase,\bm{y})$, a KL divergence between $\bm{\pi}_t$ and $\bm{\pi}^{*}_t$, and BCE losses for the auxiliary cue and risk targets. CEC is trained with $\mathcal{L}_{g}(\gfinal,\bm{y})$, a smooth-$\ell_1$ loss toward the clipped adjustment target $\operatorname{clip}(\bm{y}-\gbase,-\delta_{\mathrm{CEC}},\delta_{\mathrm{CEC}})$, and an $\ell_1$ penalty on adjustment magnitude. The total objective is
+Both terms are averaged over valid channels with the sample weights. HUC receives this loss on $\gbase$, a policy loss $\mathcal{L}_{\mathrm{policy}}=D_{\mathrm{KL}}(\bm{\pi}^*\|\bm{\pi}_t)$, and auxiliary confidence and risk losses. The auxiliary losses use binary cross-entropy with their corresponding validity masks; policy supervision requires both state targets to be valid.
+
+RUC receives the update loss on $\gfinal$ and a smooth-$\ell_1$ loss $\mathcal{L}_{\mathrm{adj}}$ toward
+\begin{equation}
+\Delta\bm{g}_t^*=
+\operatorname{clip}\!\left(
+\bm{y}-\operatorname{stopgrad}(\gbase),
+-\delta_{\mathrm{RUC}},\delta_{\mathrm{RUC}}
+\right).
+\label{eq:adjustment_target}
+\end{equation}
+An additional penalty $\mathcal{L}_{\mathrm{sparse}}$ averages the absolute correction magnitudes to limit unnecessary changes. The full objective is
 \begin{equation}
 \begin{split}
-\mathcal{L}
-=\;&
-\lambda_{\mathrm{base}}\mathcal{L}_{g}^{\mathrm{base}}
+\mathcal{L}={}&
+\lambda_{\mathrm{base}}\mathcal{L}_g^{\mathrm{base}}
 +\lambda_{\mathrm{policy}}\mathcal{L}_{\mathrm{policy}}
 +\lambda_{\mathrm{cue}}\mathcal{L}_{\mathrm{cue}}
 +\lambda_{\mathrm{risk}}\mathcal{L}_{\mathrm{risk}}\\
-&+\lambda_{\mathrm{final}}\mathcal{L}_{g}^{\mathrm{final}}
+&+\lambda_{\mathrm{final}}\mathcal{L}_g^{\mathrm{final}}
 +\lambda_{\mathrm{adj}}\mathcal{L}_{\mathrm{adj}}
-+\lambda_{\mathrm{sparse}}\|\Delta\bm{g}_t\|_1.
++\lambda_{\mathrm{sparse}}\mathcal{L}_{\mathrm{sparse}}.
 \end{split}
 \label{eq:total_loss}
 \end{equation}
-
-BCE emphasizes the write/hold endpoints, whereas MSE preserves continuous target distance. Policy KL transfers prototype geometry, and the adjustment loss supervises the calibration remaining after CUE. The final $\ell_1$ term discourages needless changes. All loss weights are treated as hyperparameters; their selected values are reported with the implementation details rather than embedded in the method definition.
+Here $\mathcal{L}_{\mathrm{cue}}$ means the auxiliary confidence loss. The two components are trained together, but RUC's losses do not change HUC's parameters. Network dimensions, loss weights, and optimization settings are reported in the implementation details.
 
 \paragraph{Online inference.}
-Algorithm~\ref{alg:online} summarizes the online computation. The future rollout machinery is discarded after training. DUETTrack requires only one causal pass for active matched tracks, then applies Eqs.~\eqref{eq:motion_assimilation} and \eqref{eq:appearance_assimilation}.
+Algorithm~\ref{alg:online} summarizes a tracking step. After prediction and association, matched tracks with enough history are processed as a batch. Their current events are formed from the states before updating, combined with the recent histories, and passed through HUC and RUC. The resulting weights control the state updates, after which the events are retained for later frames. Tracks without sufficient matched history follow the full update. In the algorithm, $\mathcal{Z}_t^i$ collects the evidence tokens, auxiliary predictions, and current structured features passed to RUC.
 
-After TrackTrack completes prediction and assignment, eligible tracks are batched for CUE and CEC and assimilated before frame $t+1$. Attention is confined to six temporal positions and three cross-evidence tokens; no rollback, future buffering, or second assignment pass is required.
+For unmatched tracks, the detection-dependent input is absent and the update weights are set to zero. The unmatched event remains in the history, while prediction and track status updates continue. Event buffers are cleared or masked at resets and track termination. Future rollouts, ground-truth annotations, and offline identity prototypes are used only to construct training supervision and are not required by the online tracker.
 
-\begin{duetalgorithm}{Causal online inference of DUETTrack at frame $t$.}
+\begin{duetalgorithm}{Causal online inference of SHUTrack at frame $t$.}
 \label{alg:online}
 \DuetAlgoIO{Input}{Detections $\mathcal{B}_t$, active tracklets $\mathcal{T}_{t-1}^{act}$, and per-track causal event buffers $\mathcal{H}_{t-1}$.}
 \DuetAlgoIO{Output}{Updated active tracklets $\mathcal{T}_{t}^{act}$ and event buffers $\mathcal{H}_{t}$.}
 
-\DuetAlgoStage{appearanceorange}{Host prediction and TrackTrack association}
-\DuetAlgoLine{$\hat{\mathcal{T}}_t \leftarrow \mathrm{TrackTrackPredict}(\mathcal{T}_{t-1}^{act})$}
+\DuetAlgoStage{appearanceorange}{Motion prediction and detection association}
+\DuetAlgoLine{$\hat{\mathcal{T}}_t \leftarrow \mathrm{PredictTracks}(\mathcal{T}_{t-1}^{act})$}
 \DuetAlgoLine{$(\mathcal{M}_t,\mathcal{U}_{t}^{\mathrm{trk}},\mathcal{U}_{t}^{\mathrm{det}})
-\leftarrow \mathrm{TrackTrackAssociate}(\hat{\mathcal{T}}_t,\mathcal{B}_t)$}
+\leftarrow \mathrm{AssociateDetections}(\hat{\mathcal{T}}_t,\mathcal{B}_t)$}
 
-\DuetAlgoStage{motionblue}{Matched-event construction and causal utility estimation}
+\DuetAlgoStage{motionblue}{Matched events and temporal context}
 \DuetAlgoLine{$\mathcal{D}_t\leftarrow\varnothing,\quad \mathcal{H}_t\leftarrow\mathcal{H}_{t-1}$}
 \DuetAlgoLine{\DuetKw{foreach} $(i,j)\in\mathcal{M}_t$ \DuetKw{do}}
 \DuetAlgoLine{\DuetAlgoIndent\DuetKw{if} $\mathrm{Mature}(\hat{\tau}_t^i)$ \DuetKw{then}}
@@ -444,25 +399,25 @@ $\bar{\mathcal{H}}_t^i\leftarrow\mathrm{CausalWindow}(\mathcal{H}_{t-1}^i\oplus\
 \DuetAlgoLine{\DuetAlgoIndent\DuetAlgoIndent
 $\mathcal{D}_t\leftarrow\mathcal{D}_t\cup\{(i,j,\bm{e}_t^i,\bar{\mathcal{H}}_t^i)\}$}
 \DuetAlgoLine{\DuetAlgoIndent\DuetKw{else}\quad
-$\tau_t^i\leftarrow\mathrm{HostUpdate}(\hat{\tau}_t^i,\bm{b}_t^j)$}
+$\tau_t^i\leftarrow\mathrm{FullUpdate}(\hat{\tau}_t^i,\bm{b}_t^j)$}
 
-\DuetAlgoStage{draftred}{Batched CUE--CEC estimation and dual-state assimilation}
-\DuetAlgoLine{$\{\bm{g}_{t}^{0,i}\}\leftarrow\mathrm{CUE}(\{\bar{\mathcal{H}}_t^i\}_{\mathcal{D}_t})$}
+\DuetAlgoStage{draftred}{Batched HUC--RUC prediction and state update control}
+\DuetAlgoLine{$\{\bm{g}_{t}^{0,i},\mathcal{Z}_t^i\}\leftarrow\mathrm{HUC}(\{\bar{\mathcal{H}}_t^i\}_{\mathcal{D}_t})$}
 \DuetAlgoLine{$\{\Delta\bm{g}_t^i\}\leftarrow
-\mathrm{CEC}(\{\bar{\mathcal{H}}_t^i,\operatorname{stopgrad}(\bm{g}_{t}^{0,i})\}_{\mathcal{D}_t})$}
+\mathrm{RUC}(\{\mathcal{Z}_t^i,\operatorname{stopgrad}(\bm{g}_{t}^{0,i})\}_{\mathcal{D}_t})$}
 \DuetAlgoLine{\DuetKw{foreach} $(i,j,\bm{e}_t^i,\bar{\mathcal{H}}_t^i)\in\mathcal{D}_t$ \DuetKw{do}}
 \DuetAlgoLine{\DuetAlgoIndent
 $\bm{g}_t^i\leftarrow\operatorname{clip}_{[0,1]}(\bm{g}_{t}^{0,i}+\Delta\bm{g}_t^i)$}
 \DuetAlgoLine{\DuetAlgoIndent
-$(\bm{\mu}_t^+,\bm{P}_t^+),\bm{f}_t^+\leftarrow
-\mathrm{KFUpdate}(\hat{\tau}_t^i,\bm{b}_t^j),\mathrm{EMA}(\hat{\tau}_t^i,\bm{b}_t^j)$}
+$(\bm{\mu}_t^+,\bm{P}_t^+),\bar{\bm{f}}_t^+\leftarrow
+\mathrm{KFUpdate}(\hat{\tau}_t^i,\bm{b}_t^j),\mathrm{EMACandidate}(\hat{\tau}_t^i,\bm{b}_t^j)$}
 \DuetAlgoLine{\DuetAlgoIndent
 $\tau_t^i\leftarrow
-\mathrm{DualAssimilate}(\hat{\tau}_t^i,\bm{\mu}_t^+,\bm{P}_t^+,\bm{f}_t^+,\bm{g}_t^i)$}
+\mathrm{ControlledUpdate}(\hat{\tau}_t^i,\bm{\mu}_t^+,\bm{P}_t^+,\bar{\bm{f}}_t^+,\bm{g}_t^i)$}
 \DuetAlgoLine{\DuetAlgoIndent
 $\mathcal{H}_t^i\leftarrow\mathrm{Append}(\mathcal{H}_{t-1}^i,\bm{e}_t^i)$}
 
-\DuetAlgoStage{modulegreen}{Unmatched events and unchanged track management}
+\DuetAlgoStage{modulegreen}{Unmatched events and track management}
 \DuetAlgoLine{\DuetKw{foreach} $i\in\mathcal{U}_{t}^{\mathrm{trk}}$ \DuetKw{do}}
 \DuetAlgoLine{\DuetAlgoIndent\DuetKw{if} $\mathrm{Mature}(\hat{\tau}_t^i)$ \DuetKw{then}}
 \DuetAlgoLine{\DuetAlgoIndent\DuetAlgoIndent
@@ -471,7 +426,7 @@ $\bm{e}_t^i\leftarrow\mathrm{BuildUnmatchedEvent}(\hat{\tau}_t^i),\quad
 \DuetAlgoLine{\DuetAlgoIndent\DuetAlgoIndent
 $\mathcal{H}_t^i\leftarrow\mathrm{Append}(\mathcal{H}_{t-1}^i,\bm{e}_t^i)$}
 \DuetAlgoLine{\DuetAlgoIndent
-$\tau_t^i\leftarrow\mathrm{HostUnmatchedUpdate}(\hat{\tau}_t^i)$}
+$\tau_t^i\leftarrow\mathrm{UpdateUnmatchedTrack}(\hat{\tau}_t^i)$}
 \DuetAlgoLine{$\mathcal{T}_{t}^{new}\leftarrow
 \mathrm{TrackInit}(\mathcal{U}_{t}^{\mathrm{det}},\mathcal{B}_t)$}
 \DuetAlgoLine{$\mathcal{T}_{t}^{act}\leftarrow
@@ -490,7 +445,7 @@ We separate benchmark reporting from method selection. The three public test set
 \subsection{Implementation Details}
 DUETTrack is integrated only into TrackTrack \cite{shim2025focusing}; we do not claim cross-tracker plug-and-play generalization. The detector, ReID model, data split, candidate construction, association thresholds, post-processing, and track management are identical to the TrackTrack configuration used in the MTUTrack experimental protocol. Specifically, MOT17 and MOT20 use the public YOLOX \cite{ge2021yolox} detector weights provided by ByteTrack \cite{zhang2022bytetrack}, while SportsMOT uses the detector configuration provided by MixSort-OC \cite{cui2023sportsmot}. Test results are obtained from post-processed submissions.
 
-CUE uses a six-event context, 128-dimensional event embeddings, a two-layer Transformer with four heads and feed-forward dimension 256, and $\delta_{\mathrm{CUE}}=0.15$. CEC projects both evidence streams to 128 dimensions, uses four-head temporal and cross-evidence attention, and sets $\delta_{\mathrm{CEC}}=0.05$. The inherited appearance update uses $\alpha=0.95$.
+HUC uses a six-event context, 128-dimensional event embeddings, a two-layer Transformer with four heads and feed-forward dimension 256, and $\delta_{\mathrm{HUC}}=0.15$. RUC projects both evidence streams to 128 dimensions, uses four-head temporal and cross-evidence attention, and sets $\delta_{\mathrm{RUC}}=0.05$. The inherited appearance update uses $\alpha=0.95$.
 
 For counterfactual label construction, we set $K=5$, $\lambda_{\mathrm{loc}}=0.25$, $\theta_{\mathrm{match}}=0.3$, $N_{\mathrm{proto}}=3$, $\theta_{\mathrm{proto}}^{\mathrm{IoU}}=0.7$, and $\theta_{\mathrm{proto}}^{\mathrm{score}}=0.6$. The benefit temperature in Eq.~\eqref{eq:oracle_soft} is computed independently for motion and appearance with $\tau_{\min}=10^{-3}$ and $\tau_{\max}=0.1$; the confidence scale is $\kappa=2$, and the policy-target temperature is $\tau_{\mathrm{policy}}=0.1$.
 
